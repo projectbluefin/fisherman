@@ -12,18 +12,45 @@ import (
 // WarmCaches pre-generates system caches inside the installed target so that
 // first boot is snappy. Runs commands inside the target chroot/bindmount.
 // Each cache is independent and non-fatal — we log and continue on failure.
+//
+// For composefs-native systems, /usr is served read-only from the OCI image's
+// content-addressed composefs store; those caches are already pre-built at
+// image build time and cannot be updated by writing to the target btrfs.
+// All /usr-based cache functions silently no-op because their source dirs
+// don't exist under the btrfs root. The writable /var lives at
+// state/os/default/var, and ldconfig is skipped because the composefs image
+// ships a correct ld.so.cache already.
 func WarmCaches(targetRoot string) {
+	composefs := isComposeFsNative(targetRoot)
+
+	// For composefs-native, resolve the correct writable /var and skip ldconfig.
+	// For ostree, var is at target/var and ldconfig runs normally.
+	flatpakDir := filepath.Join(targetRoot, "var", "lib", "flatpak")
+	skipLdconfig := false
+	if composefs {
+		flatpakDir = filepath.Join(ComposeFsVarDir(targetRoot), "lib", "flatpak")
+		// ldconfig -r TARGET writes to TARGET/etc/ld.so.cache; for composefs-native
+		// the writable /etc is under state/deploy/<hash>/etc — skip it since the
+		// OCI image already ships a correct ld.so.cache.
+		skipLdconfig = true
+	}
+
 	caches := []struct {
 		name string
 		fn   func(string) error
 	}{
-		{"Flatpak appstream", warmFlatpakAppstream},
+		{"Flatpak appstream", func(_ string) error { return warmFlatpakAppstream(flatpakDir) }},
 		{"font cache", warmFontCache},
 		{"icon theme cache", warmIconCache},
 		{"GSettings schemas", warmGSettingsSchemas},
 		{"gdk-pixbuf loaders", warmPixbufLoaders},
 		{"GIO modules", warmGIOModules},
-		{"dynamic linker cache", warmLdconfig},
+		{"dynamic linker cache", func(_ string) error {
+			if skipLdconfig {
+				return nil
+			}
+			return warmLdconfig(targetRoot)
+		}},
 		{"man-db", warmManDB},
 	}
 
@@ -39,11 +66,12 @@ func WarmCaches(targetRoot string) {
 	progress.Info(fmt.Sprintf("Pre-warmed %d/%d system caches for instant first boot", warmed, len(caches)))
 }
 
-// warmFlatpakAppstream regenerates the Flatpak appstream cache so
-// GNOME Software opens instantly without a multi-minute refresh.
-func warmFlatpakAppstream(target string) error {
-	// System flatpak store lives at /var/lib/flatpak
-	flatpakDir := filepath.Join(target, "var", "lib", "flatpak")
+// warmFlatpakAppstream touches the appstream .timestamp so gnome-software
+// doesn't trigger a full remote refresh on first boot.
+// flatpakDir is the actual flatpak root directory, e.g.:
+//   - ostree:           $TARGET/var/lib/flatpak
+//   - composefs-native: $TARGET/state/os/default/var/lib/flatpak
+func warmFlatpakAppstream(flatpakDir string) error {
 	if _, err := os.Stat(flatpakDir); os.IsNotExist(err) {
 		return nil // no flatpaks installed, nothing to cache
 	}

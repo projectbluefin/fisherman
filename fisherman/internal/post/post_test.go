@@ -88,22 +88,39 @@ func setupMockExec(t *testing.T) *mockExecutor {
 	return mock
 }
 
-// TestWriteHostname_ComposeFsNative verifies that when no /ostree/ directory
-// exists under the target (composefs-native deployment), hostname is written
-// directly to $TARGET/etc/hostname.
+// TestWriteHostname_ComposeFsNative verifies that for a composefs-native
+// deployment hostname is written to the deploy etc dir returned by
+// ComposeFsDeployEtcDirFn, not to $TARGET/etc/hostname directly.
 func TestWriteHostname_ComposeFsNative(t *testing.T) {
 	target := t.TempDir()
+
+	// Set up the stub deploy etc dir (simulates state/deploy/<hash>/etc).
+	deployEtc := filepath.Join(target, "state", "deploy", "abc123", "etc")
+	if err := os.MkdirAll(deployEtc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override ComposeFsDeployEtcDirFn to return our stub path.
+	old := post.ComposeFsDeployEtcDirFn
+	post.ComposeFsDeployEtcDirFn = func(string) (string, error) { return deployEtc, nil }
+	t.Cleanup(func() { post.ComposeFsDeployEtcDirFn = old })
+
 	if err := post.WriteHostname(target, "myhost"); err != nil {
 		t.Fatalf("WriteHostname: %v", err)
 	}
 
-	hostnameFile := filepath.Join(target, "etc", "hostname")
+	// Hostname must land in the deploy etc, not in $TARGET/etc.
+	hostnameFile := filepath.Join(deployEtc, "hostname")
 	data, err := os.ReadFile(hostnameFile)
 	if err != nil {
-		t.Fatalf("reading hostname file: %v", err)
+		t.Fatalf("reading hostname file from deploy etc: %v", err)
 	}
 	if string(data) != "myhost\n" {
 		t.Errorf("hostname file content = %q, want %q", string(data), "myhost\n")
+	}
+	// Confirm nothing was written to the wrong path.
+	if _, err := os.Stat(filepath.Join(target, "etc", "hostname")); err == nil {
+		t.Error("hostname was unexpectedly written to $TARGET/etc/hostname (wrong path)")
 	}
 }
 
@@ -538,38 +555,118 @@ func TestEnsureLuksArgs(t *testing.T) {
 }
 
 func TestEnablePrintServices(t *testing.T) {
-dir := t.TempDir()
+	t.Run("composefs-native", func(t *testing.T) {
+		dir := t.TempDir()
 
-// Intercept runner.RunFn so "ls <sysroot>/ostree" returns an error (not composefs),
-// which makes enableSystemService fall through to DeploymentDirFn.
-origRunFn := runner.RunFn
-defer func() { runner.RunFn = origRunFn }()
-runner.RunFn = func(_ io.Reader, _ string, _ ...string) error { return nil }
+		// Set up stub deploy etc dir.
+		deployEtc := filepath.Join(dir, "state", "deploy", "abc123", "etc")
+		if err := os.MkdirAll(filepath.Join(deployEtc, "systemd", "system"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 
-// Intercept runner.OutputFn so "ls <sysroot>/ostree" returns no "deploy" string,
-// confirming not composefs-native.
-origOutputFn := runner.OutputFn
-defer func() { runner.OutputFn = origOutputFn }()
-runner.OutputFn = func(_ string, _ ...string) ([]byte, error) { return []byte(""), nil }
+		// Override ComposeFsDeployEtcDirFn.
+		old := post.ComposeFsDeployEtcDirFn
+		post.ComposeFsDeployEtcDirFn = func(string) (string, error) { return deployEtc, nil }
+		t.Cleanup(func() { post.ComposeFsDeployEtcDirFn = old })
 
-// Override DeploymentDirFn so it points to our temp dir.
-origFn := post.DeploymentDirFn
-defer func() { post.DeploymentDirFn = origFn }()
-deployDir := filepath.Join(dir, "deploy")
-if err := os.MkdirAll(filepath.Join(deployDir, "etc", "systemd", "system"), 0o755); err != nil {
-	t.Fatal(err)
+		post.EnablePrintServices(dir)
+
+		wantsDir := filepath.Join(deployEtc, "systemd", "system", "multi-user.target.wants")
+		for _, svc := range []string{"cups-browsed.service", "avahi-daemon.service", "ipp-usb.service"} {
+			link := filepath.Join(wantsDir, svc)
+			if _, err := os.Lstat(link); err != nil {
+				t.Errorf("expected symlink for %s in deploy etc, got: %v", svc, err)
+			}
+		}
+	})
+
+	t.Run("ostree", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Create /ostree/ dir so isComposeFsNative returns false.
+		if err := os.MkdirAll(filepath.Join(dir, "ostree"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Intercept runner so "ls <sysroot>/ostree" succeeds (not composefs-native).
+		origRunFn := runner.RunFn
+		defer func() { runner.RunFn = origRunFn }()
+		runner.RunFn = func(_ io.Reader, _ string, _ ...string) error { return nil }
+
+		// Override DeploymentDirFn.
+		origFn := post.DeploymentDirFn
+		defer func() { post.DeploymentDirFn = origFn }()
+		deployDir := filepath.Join(dir, "deploy")
+		if err := os.MkdirAll(filepath.Join(deployDir, "etc", "systemd", "system"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		post.DeploymentDirFn = func(string) (string, error) { return deployDir, nil }
+
+		post.EnablePrintServices(dir)
+
+		wantsDir := filepath.Join(deployDir, "etc", "systemd", "system", "multi-user.target.wants")
+		for _, svc := range []string{"cups-browsed.service", "avahi-daemon.service", "ipp-usb.service"} {
+			link := filepath.Join(wantsDir, svc)
+			if _, err := os.Lstat(link); err != nil {
+				t.Errorf("expected symlink for %s in deploy dir, got: %v", svc, err)
+			}
+		}
+	})
 }
-post.DeploymentDirFn = func(sysroot string) (string, error) {
-	return deployDir, nil
-}
 
-post.EnablePrintServices(dir)
+// TestDefaultComposeFsDeployEtcDir_BLSEntry verifies that the BLS loader entry
+// composefs= field is parsed correctly to find the deploy etc dir.
+func TestDefaultComposeFsDeployEtcDir_BLSEntry(t *testing.T) {
+	target := t.TempDir()
+	const hash = "61b6b932abc"
 
-wantsDir := filepath.Join(deployDir, "etc", "systemd", "system", "multi-user.target.wants")
-for _, svc := range []string{"cups-browsed.service", "avahi-daemon.service", "ipp-usb.service"} {
-	link := filepath.Join(wantsDir, svc)
-	if _, err := os.Lstat(link); err != nil {
-		t.Errorf("expected symlink for %s to exist, got: %v", svc, err)
+	// Create the deploy etc dir.
+	deployEtc := filepath.Join(target, "state", "deploy", hash, "etc")
+	if err := os.MkdirAll(deployEtc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a BLS loader entry with composefs=<hash>.
+	entriesDir := filepath.Join(target, "boot", "loader", "entries")
+	if err := os.MkdirAll(entriesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := "title Bluefin\nversion 1\noptions root=UUID=abc rw composefs=" + hash + " rhgb quiet\n"
+	if err := os.WriteFile(filepath.Join(entriesDir, "entry.conf"), []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := post.DefaultComposeFsDeployEtcDir(target)
+	if err != nil {
+		t.Fatalf("DefaultComposeFsDeployEtcDir: %v", err)
+	}
+	if got != deployEtc {
+		t.Errorf("got %q, want %q", got, deployEtc)
 	}
 }
+
+// TestDefaultComposeFsDeployEtcDir_Fallback verifies the fallback to newest
+// state/deploy entry when no BLS entry is present.
+func TestDefaultComposeFsDeployEtcDir_Fallback(t *testing.T) {
+	target := t.TempDir()
+
+	// Create two deploy dirs; the second is newer.
+	deployBase := filepath.Join(target, "state", "deploy")
+	first := filepath.Join(deployBase, "oldhash123", "etc")
+	second := filepath.Join(deployBase, "newhash456", "etc")
+	if err := os.MkdirAll(first, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := post.DefaultComposeFsDeployEtcDir(target)
+	if err != nil {
+		t.Fatalf("DefaultComposeFsDeployEtcDir: %v", err)
+	}
+	// Should return one of the two deploy etc dirs (whichever is newest).
+	if got != first && got != second {
+		t.Errorf("got %q, expected one of %q or %q", got, first, second)
+	}
 }

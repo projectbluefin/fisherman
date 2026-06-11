@@ -88,6 +88,95 @@ func (c *Cleanup) Run() {
 	}
 }
 
+// DefaultComposeFsDeployEtcDir finds the writable /etc directory for the
+// composefs-native deployment installed at target.  The bootc composefs-native
+// layout stores the writable /etc at state/deploy/<COMPOSEFS_HASH>/etc/ — the
+// same hash that appears in the kernel command line as composefs=<HASH> at boot.
+//
+// Discovery priority:
+//  1. Read composefs=<HASH> from any BLS loader entry under
+//     $TARGET/boot/loader/entries/ or $TARGET/boot/efi/loader/entries/.
+//  2. Fall back to the newest directory under $TARGET/state/deploy/ (safe for
+//     fresh installs where only one deployment exists).
+//
+// This path is bind-mounted at /etc on the booted system and must be used
+// instead of $TARGET/etc/ for any post-install write that should be visible
+// after first boot.
+func DefaultComposeFsDeployEtcDir(target string) (string, error) {
+	// Preferred: parse composefs=<HASH> from BLS loader entries.
+	for _, loaderDir := range []string{
+		filepath.Join(target, "boot", "loader", "entries"),
+		filepath.Join(target, "boot", "efi", "loader", "entries"),
+	} {
+		entries, err := filepath.Glob(filepath.Join(loaderDir, "*.conf"))
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		for _, entry := range entries {
+			data, err := os.ReadFile(entry)
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				if !strings.HasPrefix(strings.TrimSpace(line), "options") {
+					continue
+				}
+				for _, field := range strings.Fields(line) {
+					if !strings.HasPrefix(field, "composefs=") {
+						continue
+					}
+					hash := strings.TrimPrefix(field, "composefs=")
+					if hash == "" {
+						continue
+					}
+					deployEtc := filepath.Join(target, "state", "deploy", hash, "etc")
+					if _, statErr := os.Stat(deployEtc); statErr == nil {
+						return deployEtc, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: pick the newest directory under state/deploy/.
+	deployBase := filepath.Join(target, "state", "deploy")
+	entries, err := os.ReadDir(deployBase)
+	if err != nil {
+		return "", fmt.Errorf("reading composefs deploy base %s: %w", deployBase, err)
+	}
+	var newestName string
+	var newestMtime time.Time
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if newestName == "" || info.ModTime().After(newestMtime) {
+			newestName = e.Name()
+			newestMtime = info.ModTime()
+		}
+	}
+	if newestName == "" {
+		return "", fmt.Errorf("no composefs deploy directory found under %s", deployBase)
+	}
+	return filepath.Join(deployBase, newestName, "etc"), nil
+}
+
+// ComposeFsDeployEtcDirFn is called by composefs-native post-install functions
+// to locate the writable /etc for the active deployment. Tests replace this with
+// a stub; restore with DefaultComposeFsDeployEtcDir.
+var ComposeFsDeployEtcDirFn = DefaultComposeFsDeployEtcDir
+
+// ComposeFsVarDir returns the writable /var directory for composefs-native
+// installs. The bootc composefs-native layout bind-mounts this path at /var
+// at boot.
+func ComposeFsVarDir(target string) string {
+	return filepath.Join(target, "state", "os", "default", "var")
+}
+
 // DefaultDeploymentDir returns the ostree deployment directory inside sysroot
 // using `ostree admin --sysroot=<sysroot> --print-current-dir`.
 func DefaultDeploymentDir(sysroot string) (string, error) {
@@ -123,13 +212,17 @@ func IsComposeFsNativeExported(sysroot string) bool {
 }
 
 // WriteHostname writes /etc/hostname into the installed system at target.
-// For ostree-based deployments the hostname goes into the ostree deployment
-// subtree (found via DeploymentDirFn). For composefs-native deployments it goes
-// directly at $TARGET/etc/hostname.
+// For composefs-native deployments, the hostname goes into the active deploy
+// etc dir (found via ComposeFsDeployEtcDirFn). For ostree-based deployments
+// it goes into the ostree deployment subtree (found via DeploymentDirFn).
 func WriteHostname(target, hostname string) error {
 	var etcDir string
 	if isComposeFsNative(target) {
-		etcDir = filepath.Join(target, "etc")
+		var err error
+		etcDir, err = ComposeFsDeployEtcDirFn(target)
+		if err != nil {
+			return fmt.Errorf("finding composefs deploy etc: %w", err)
+		}
 	} else {
 		deployDir, err := DeploymentDirFn(target)
 		if err != nil {
@@ -474,7 +567,11 @@ func CopyWiFiConnections(target string) error {
 	// Resolve the target NM connections path (composefs-native vs ostree).
 	var dst string
 	if isComposeFsNative(target) {
-		dst = filepath.Join(target, "etc", "NetworkManager", "system-connections")
+		etcDir, err := ComposeFsDeployEtcDirFn(target)
+		if err != nil {
+			return fmt.Errorf("finding composefs deploy etc for WiFi connections: %w", err)
+		}
+		dst = filepath.Join(etcDir, "NetworkManager", "system-connections")
 	} else {
 		deployDir, err := DeploymentDirFn(target)
 		if err != nil {
@@ -522,11 +619,16 @@ func EnablePrintServices(target string) {
 }
 
 
-// system at target. Works for both composefs-native and ostree-based deployments.
+// AppendFstabEntry appends an fstab entry to the installed system at target.
+// Works for both composefs-native and ostree-based deployments.
 func AppendFstabEntry(target, uuid, mountpoint, fstype, options string) error {
 	var etcDir string
 	if isComposeFsNative(target) {
-		etcDir = filepath.Join(target, "etc")
+		var err error
+		etcDir, err = ComposeFsDeployEtcDirFn(target)
+		if err != nil {
+			return fmt.Errorf("finding composefs deploy etc for fstab: %w", err)
+		}
 	} else {
 		deployDir, err := DeploymentDirFn(target)
 		if err != nil {

@@ -142,6 +142,15 @@ func TestParsePwCliOutput(t *testing.T) {
 func TestGenerateAudioConfigWritesFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	// Set up a stub composefs deploy etc dir.
+	deployEtc := filepath.Join(tmpDir, "state", "deploy", "abc123", "etc")
+	if err := os.MkdirAll(deployEtc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFn := ComposeFsDeployEtcDirFn
+	ComposeFsDeployEtcDirFn = func(string) (string, error) { return deployEtc, nil }
+	defer func() { ComposeFsDeployEtcDirFn = oldFn }()
+
 	// Mock the executor to return known pw-cli output
 	origExec := Exec
 	defer func() { Exec = origExec }()
@@ -163,7 +172,7 @@ func TestGenerateAudioConfigWritesFile(t *testing.T) {
 		t.Fatalf("GenerateAudioConfig() error: %v", err)
 	}
 
-	confPath := filepath.Join(tmpDir, "etc", "wireplumber", "wireplumber.conf.d", "60-friendly-audio-names.conf")
+	confPath := filepath.Join(deployEtc, "wireplumber", "wireplumber.conf.d", "60-friendly-audio-names.conf")
 	data, err := os.ReadFile(confPath)
 	if err != nil {
 		t.Fatalf("config file not written: %v", err)
