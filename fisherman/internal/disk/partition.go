@@ -105,13 +105,18 @@ func SetPartitionType(disk string, partNum int, partType string) error {
 // Partition wipes disk and creates a three-partition GPT layout using sfdisk:
 //
 //	Partition 1 – EFI System (512 MiB)
-//	Partition 2 – /boot     (1 GiB, ext4 — bootloader reads this)
+//	Partition 2 – /boot     (2 GiB, ext4 — bootloader reads this)
 //	Partition 3 – Linux root (remaining space)
 //
 // A separate /boot partition is required because GRUB's built-in XFS driver
 // does not support the newer XFS features enabled by mkfs.xfs on el10
 // (nrext64, exchange, rmapbt). By keeping /boot on ext4, GRUB never needs
 // to parse XFS. This matches what bootc install to-disk always does.
+//
+// 2 GiB provides headroom for the running deployment, a staged upgrade, and
+// a rollback entry — each kernel+initramfs pair can be 200-400 MiB with large
+// driver sets (e.g. NVIDIA), so 1 GiB fills up quickly once entries accumulate.
+// The systemd-boot layout already uses 2 GiB for the same reason.
 //
 // On real block devices sfdisk notifies the kernel via BLKRRPART, so
 // partition devices appear after udevadm settle. Loop devices reject
@@ -122,7 +127,7 @@ func Partition(disk string) error {
 		"label: gpt",
 		"",
 		`size=512MiB, type=uefi, name="EFI-SYSTEM"`,
-		`size=1GiB,   type=linux, name="boot"`,
+		`size=2GiB,   type=linux, name="boot"`,
 		`type=linux, name="root"`,
 	}, "\n") + "\n"
 	return partition(disk, script)
