@@ -117,6 +117,19 @@ type VarDiskSpec struct {
 	KeepExisting bool   `json:"keepExisting"` // if true, mount as-is; if false, format XFS
 }
 
+// isSupportedMountFstype reports whether a customMount fstype is one
+// disk.formatPartition() can actually act on. Keep in sync with that switch:
+// the empty string and "unformatted" mean "mount, do not format", which is what
+// a pre-populated partition such as an existing ESP requires.
+func isSupportedMountFstype(fstype string) bool {
+	switch fstype {
+	case "", "unformatted", "swap", "fat32", "ext3", "ext4", "xfs", "btrfs":
+		return true
+	default:
+		return false
+	}
+}
+
 // CustomMount describes a single partition → mountpoint mapping for manual layouts.
 type CustomMount struct {
 	Partition string `json:"partition"` // e.g. "/dev/sda1"
@@ -160,9 +173,33 @@ func (r *Recipe) Validate() error {
 			if cm.Target == "/" {
 				hasRoot = true
 			}
+			// Validate the fstype here, where it is cheap and non-destructive.
+			// disk.ApplyCustomLayout() only discovers an unsupported value once
+			// it reaches formatPartition() — by which point the caller may
+			// already have repartitioned a disk on the strength of this recipe
+			// validating. A caller passing "vfat" (the obvious spelling, and
+			// not one we accept) got exactly that: validation passed, the
+			// install died mid-flight.
+			if !isSupportedMountFstype(cm.Fstype) {
+				return fmt.Errorf("customMounts[%d]: unsupported fstype %q "+
+					"(supported: fat32, ext3, ext4, xfs, btrfs, swap, or "+
+					"\"unformatted\"/\"\" to mount without formatting)", i, cm.Fstype)
+			}
 		}
 		if !hasRoot {
 			return fmt.Errorf("customMounts: no root (/) partition specified")
+		}
+		// Encryption is NOT applied on the manual path: luksFormat/luksOpen run
+		// only in the auto-partition branch below, and TPM enrolment needs an
+		// activeRootPart that manual mode leaves empty. Accepting an encrypted
+		// manual recipe therefore produces an install that completes
+		// UNENCRYPTED while the caller believes otherwise — a security-boundary
+		// failure, so fail closed here rather than silently downgrade.
+		// (Same shape as the ZFS+LUKS rejection below.)
+		if r.Encryption.Type != "" && r.Encryption.Type != "none" {
+			return fmt.Errorf("encryption %q is not supported with customMounts: "+
+				"manual layouts do not run luksFormat, so the install would complete "+
+				"unencrypted", r.Encryption.Type)
 		}
 	} else {
 		if r.Disk == "" {
