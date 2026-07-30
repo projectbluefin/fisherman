@@ -167,7 +167,7 @@ func streamCategory(srcDir, dstDir string, budget int64) (int64, int) {
 	var totalBytes int64
 	var count int
 
-	filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

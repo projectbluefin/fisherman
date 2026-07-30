@@ -347,7 +347,7 @@ func GenerateSystemThumbnails(target string, composeFsNative bool) int {
 			continue
 		}
 
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return nil
 			}
@@ -444,7 +444,7 @@ func CleanupScratch() {
 // dirSize returns total bytes of all files under a directory.
 func dirSize(path string) int64 {
 	var total int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

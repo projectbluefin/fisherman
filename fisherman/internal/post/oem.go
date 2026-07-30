@@ -359,7 +359,7 @@ func writeMenuIconOverride(target string, iconName string) error {
 			return fmt.Errorf("finding deployment dir: %w", err)
 		}
 		etcDir = filepath.Join(deployDir, "etc")
-	} 
+	}
 	// Write dconf local.d override (higher priority than system defaults).
 	dconfDir := filepath.Join(etcDir, "dconf", "db", "local.d")
 	if err := os.MkdirAll(dconfDir, 0o755); err != nil {

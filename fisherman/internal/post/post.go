@@ -663,7 +663,6 @@ func EnablePrintServices(target string) {
 	progress.Info("Print services enabled: cups-browsed, avahi-daemon, ipp-usb")
 }
 
-
 // AppendFstabEntry appends an fstab entry to the installed system at target.
 // Works for both composefs-native and ostree-based deployments.
 func AppendFstabEntry(target, uuid, mountpoint, fstype, options string) error {

@@ -13,15 +13,15 @@ import (
 // ScanResult describes the Windows data available for migration on a disk.
 // Emitted as JSON by `fisherman scan <disk>` for the GUI to display.
 type ScanResult struct {
-	Disk       string        `json:"disk"`
+	Disk       string         `json:"disk"`
 	Partitions []NTFSPartScan `json:"partitions"`
 }
 
 // NTFSPartScan describes a single NTFS partition's available user data.
 type NTFSPartScan struct {
-	Partition string        `json:"partition"`
-	Users     []UserScan    `json:"users"`
-	TotalBytes int64        `json:"totalBytes"`
+	Partition  string     `json:"partition"`
+	Users      []UserScan `json:"users"`
+	TotalBytes int64      `json:"totalBytes"`
 }
 
 // UserScan describes one Windows user profile's available data.
@@ -34,7 +34,7 @@ type UserScan struct {
 // CategoryScan describes one data category (Documents, Pictures, etc.)
 type CategoryScan struct {
 	Name  string `json:"name"`
-	Path  string `json:"path"`  // relative to user profile
+	Path  string `json:"path"` // relative to user profile
 	Bytes int64  `json:"bytes"`
 	Count int    `json:"count"` // number of files
 }
@@ -141,7 +141,7 @@ func scanUserProfile(name, profileDir string) *UserScan {
 
 		var bytes int64
 		var count int
-		filepath.Walk(catDir, func(_ string, fi os.FileInfo, err error) error {
+		_ = filepath.Walk(catDir, func(_ string, fi os.FileInfo, err error) error {
 			if err != nil || fi.IsDir() {
 				return nil
 			}

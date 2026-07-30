@@ -420,14 +420,14 @@ func bootcViaContainer(opts Options) error {
 			storageDriver = nonComposefsDriver
 		}
 
-			// Clear any previous podman database to avoid driver-mismatch errors;
-			// the early RemoveAll when nonComposefsRoot is set handles this for
-			// the non-composefs path, so only do it for composefs here.
-			if opts.ComposeFsBackend {
-				if err := os.RemoveAll(nonComposefsRoot); err != nil && !os.IsNotExist(err) {
-					progress.Substep(fmt.Sprintf("Warning: could not clear previous podman database: %v", err))
-				}
+		// Clear any previous podman database to avoid driver-mismatch errors;
+		// the early RemoveAll when nonComposefsRoot is set handles this for
+		// the non-composefs path, so only do it for composefs here.
+		if opts.ComposeFsBackend {
+			if err := os.RemoveAll(nonComposefsRoot); err != nil && !os.IsNotExist(err) {
+				progress.Substep(fmt.Sprintf("Warning: could not clear previous podman database: %v", err))
 			}
+		}
 
 		progress.Substep(fmt.Sprintf("Using %s storage driver with OCI layout", storageDriver))
 		podmanArgs = append(podmanArgs,
@@ -862,7 +862,11 @@ func skopeoExportOCI(image, destDir, tmpdir string) error {
 			fmt.Fprintf(os.Stdout, "# /var/tmp bind-mounted → %s for blob staging\n", varTmpOverride)
 			defer func() {
 				umName, umArgs := runner.HostArgs("umount", []string{"/var/tmp"})
-				exec.Command(umName, umArgs...).Run()
+				// Best-effort teardown in a defer: if the unmount fails there
+				// is nothing useful left to do about it, and the install
+				// result must not change because cleanup was untidy. Discard
+				// explicitly so that intent is visible (and errcheck-clean).
+				_ = exec.Command(umName, umArgs...).Run()
 			}()
 		} else {
 			fmt.Fprintf(os.Stdout, "# warning: /var/tmp bind-mount failed — ENOSPC likely on overlay tmpfs\n")
