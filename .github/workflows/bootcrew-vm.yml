@@ -101,18 +101,26 @@ jobs:
         image: ${{ fromJson(needs.setup.outputs.matrix_required) }}
     steps:
       - uses: actions/checkout@v4
+
+      # Free ~30 GiB on the runner before we pull multi-GB OCI images and
+      # build a target loop disk. Pattern lifted from projectbluefin/dakota-iso.
+      #
+      # MUST run BEFORE setup-go. `tool-cache: true` deletes
+      # /opt/hostedtoolcache, which is exactly where actions/setup-go installs
+      # the toolchain — so with the old ordering every one of these jobs died
+      # at `just build` with "go: command not found" (exit 127). It went
+      # unnoticed because lint/unit-tests were failing first and this whole
+      # matrix was being skipped.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: fisherman/go.mod
           cache: true
           cache-dependency-path: fisherman/go.sum
-
-      # Free ~30 GiB on the runner before we pull multi-GB OCI images and
-      # build a target loop disk. Pattern lifted from projectbluefin/dakota-iso.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-        with:
-          tool-cache: true
 
       - name: Setup CI environment
         run: |
@@ -190,15 +198,20 @@ jobs:
         image: ${{ fromJson(needs.setup.outputs.matrix_advisory) }}
     steps:
       - uses: actions/checkout@v4
+
+      # Same ordering constraint as the required matrix above: tool-cache
+      # deletion wipes the Go toolchain setup-go installs, so it must come
+      # first or `just build` fails with "go: command not found".
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: fisherman/go.mod
           cache: true
           cache-dependency-path: fisherman/go.sum
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-        with:
-          tool-cache: true
       - name: Setup CI environment
         run: |
           sudo apt-get update -qq
