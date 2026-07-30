@@ -143,7 +143,7 @@ func scanUserProfile(name, profileDir string) *UserScan {
 		var count int
 		_ = filepath.Walk(catDir, func(_ string, fi os.FileInfo, err error) error {
 			if err != nil || fi.IsDir() {
-				return nil
+				return nil //nolint:nilerr // skip this entry and keep walking; a partial scan is intended
 			}
 			bytes += fi.Size()
 			count++

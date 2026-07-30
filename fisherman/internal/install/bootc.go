@@ -790,6 +790,15 @@ func injectStorageTmpDir(conf, newLine string) string {
 // /etc/containers/storage.conf), so we supply an explicit config file.
 //
 // The caller must remove the returned path when done.
+// NOTE: currently unreferenced. It arrived in e6ea536 ("override
+// CONTAINERS_STORAGE_CONF tmpdir to prevent ENOSPC on live ISO") and was
+// orphaned by 74993bb, which replaced that approach with a two-stage export.
+// Suppressed rather than deleted because removing code from a path that
+// exists to work around a live-ISO ENOSPC failure is the maintainers' call,
+// not a lint fix — if it is genuinely dead, deleting it is better than this
+// directive.
+//
+//nolint:unused // orphaned by 74993bb; keep or delete is a maintainer decision
 func writeStorageConfWithTmpDir(confDir, scratchDir string) (string, error) {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		return "", err

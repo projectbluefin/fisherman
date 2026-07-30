@@ -169,7 +169,7 @@ func streamCategory(srcDir, dstDir string, budget int64) (int64, int) {
 
 	_ = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
-			return nil
+			return nil //nolint:nilerr // skip this entry and keep walking; a partial migration is intended
 		}
 		// Skip hidden/system files
 		name := info.Name()
@@ -187,21 +187,21 @@ func streamCategory(srcDir, dstDir string, budget int64) (int64, int) {
 
 		relPath, err := filepath.Rel(srcDir, path)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // skip this entry and keep walking; a partial migration is intended
 		}
 
 		dstPath := filepath.Join(dstDir, relPath)
 		dstParent := filepath.Dir(dstPath)
 		if err := os.MkdirAll(dstParent, 0o755); err != nil {
-			return nil
+			return nil //nolint:nilerr // skip this entry and keep walking; a partial migration is intended
 		}
 
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // skip this entry and keep walking; a partial migration is intended
 		}
 		if err := os.WriteFile(dstPath, data, 0o644); err != nil {
-			return nil
+			return nil //nolint:nilerr // skip this entry and keep walking; a partial migration is intended
 		}
 
 		totalBytes += info.Size()
