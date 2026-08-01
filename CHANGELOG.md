@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🐛 Bug Fixes
 
+- **Scratch OCI cache freed before post-install (ENOSPC → "error writing
+  hostname")**: On live ISOs the scratch dir holding several GB of extracted
+  image blobs lives on the *target* disk. It was only deleted by the final
+  cleanup pass, so every post-install write (Flatpak copy, hostname, fstab)
+  competed with it for space. On modest disks (≤ ~25 GiB) the install failed at
+  98% with the misleading `error writing hostname: write
+  /mnt/fisherman-target/state/deploy/<hash>/etc/hostname`. `Cleanup.ReleaseScratch`
+  now unmounts and deletes the cache immediately after `bootc install` returns.
+- **Full target disk fails loudly**: `tar` reports ENOSPC only on stderr, so the
+  Flatpak copy step saw a bare `exit status 2`, downgraded it to a warning, and
+  let the install limp on to fail later with an unrelated error. ENOSPC is now
+  detected (`post.IsNoSpace`) and aborts the install with
+  `target disk is full — /dev/… is too small for this image`.
+
 - **OCI layout for non-composefs installs**: Non-composefs images (bluefin, lts,
   lts-hwe) now export to an OCI layout at scratch and use `--source-imgref oci:...`
   for `bootc install to-filesystem`. The previous VFS squash path corrupted ostree

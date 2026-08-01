@@ -272,3 +272,68 @@ func TestCleanup_NoLUKS(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanup_ReleaseScratchFreesSpaceEarly is the regression gate for the
+// "error writing hostname" install failure: the multi-GB OCI scratch cache
+// lives on the *target* disk during `bootc install`, and if it is only removed
+// by Cleanup.Run() at the very end, every post-install write (flatpak copy,
+// hostname, fstab) competes with it for space and dies with ENOSPC.
+// ReleaseScratch must unmount and delete it immediately.
+func TestCleanup_ReleaseScratchFreesSpaceEarly(t *testing.T) {
+	rec := setupRecorder(t)
+	setupRemoveAllRecorder(t, rec)
+
+	const scratch = "/mnt/target/.fisherman-scratch"
+
+	var c post.Cleanup
+	c.AddMount("/mnt/target")
+	c.AddMount(scratch)
+	c.AddPostRemoval(scratch)
+
+	if err := c.ReleaseScratch(scratch); err != nil {
+		t.Fatalf("ReleaseScratch: %v", err)
+	}
+
+	if len(rec.calls) != 2 {
+		t.Fatalf("expected umount + removeAll, got %v", rec.calls)
+	}
+	if rec.calls[0].name != "umount" || rec.calls[0].args[1] != scratch {
+		t.Errorf("first call = %v, want umount -R %s", rec.calls[0], scratch)
+	}
+	if rec.calls[1].name != "removeAll" || rec.calls[1].args[0] != scratch {
+		t.Errorf("second call = %v, want removeAll %s", rec.calls[1], scratch)
+	}
+
+	// The scratch path must be deregistered so final teardown neither
+	// re-unmounts it (spurious "not mounted" warning) nor re-deletes it.
+	rec.calls = nil
+	c.Run()
+	for _, call := range rec.calls {
+		for _, arg := range call.args {
+			if arg == scratch {
+				t.Errorf("Run() still touched released scratch path: %v", rec.calls)
+			}
+		}
+	}
+	if len(rec.calls) != 1 || rec.calls[0].args[1] != "/mnt/target" {
+		t.Errorf("Run() calls = %v, want a single umount of /mnt/target", rec.calls)
+	}
+}
+
+// TestCleanup_ReleaseScratchWithoutMount covers the non-live path, where the
+// scratch dir is a plain directory on the host and was never bind-mounted.
+func TestCleanup_ReleaseScratchWithoutMount(t *testing.T) {
+	rec := setupRecorder(t)
+	setupRemoveAllRecorder(t, rec)
+
+	var c post.Cleanup
+	c.AddPostRemoval("/var/fisherman-tmp")
+
+	if err := c.ReleaseScratch("/var/fisherman-tmp"); err != nil {
+		t.Fatalf("ReleaseScratch: %v", err)
+	}
+
+	if len(rec.calls) != 1 || rec.calls[0].name != "removeAll" {
+		t.Fatalf("expected removeAll only (no umount), got %v", rec.calls)
+	}
+}
