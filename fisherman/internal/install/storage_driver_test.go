@@ -7,14 +7,52 @@ import (
 	"testing"
 )
 
-func TestSelectStorageDriver_NonComposefs(t *testing.T) {
-	// Non-composefs also probes overlay now; /tmp is usually tmpfs so should fall back to vfs.
-	driver, reason := selectStorageDriver("/tmp")
-	if driver != "vfs" {
-		t.Errorf("non-composefs driver = %q, want vfs", driver)
+// TestSelectStorageDriver_ObeysTheFilesystemRule asserts the contract rather than
+// the runner's mount table. The previous version probed "/tmp" and required "vfs"
+// on the assumption that /tmp is tmpfs; on GitHub runners /tmp is ext4, so overlay
+// is correctly selected and the test failed for a reason that had nothing to do
+// with fisherman.
+func TestSelectStorageDriver_ObeysTheFilesystemRule(t *testing.T) {
+	dir := t.TempDir()
+
+	driver, reason := selectStorageDriver(dir)
+	if driver != "overlay" && driver != "vfs" {
+		t.Errorf("driver = %q, want overlay or vfs", driver)
 	}
-	if reason == "" {
-		t.Error("non-composefs reason should not be empty")
+	if reason == "" && driver != "overlay" {
+		t.Error("a vfs fallback must explain itself")
+	}
+
+	fsType, err := filesystemType(dir)
+	if err != nil {
+		t.Fatalf("filesystemType(%s): %v", dir, err)
+	}
+	t.Logf("scratch %s is %s; selected %s (%s)", dir, fsType, driver, reason)
+
+	// overlay must never be chosen on a filesystem that cannot support it.
+	if driver == "overlay" {
+		switch fsType {
+		case "tmpfs", "overlayfs":
+			t.Errorf("overlay selected on %s, which cannot support it", fsType)
+		}
+	}
+}
+
+// TestOverlayCandidate_RejectsTmpfs exercises the rejection branch on a path that
+// is genuinely tmpfs, instead of hoping /tmp happens to be one.
+func TestOverlayCandidate_RejectsTmpfs(t *testing.T) {
+	const shm = "/dev/shm"
+	fsType, err := filesystemType(shm)
+	if err != nil || fsType != "tmpfs" {
+		t.Skipf("%s is %q (err %v); need a tmpfs to test the rejection branch", shm, fsType, err)
+	}
+
+	got := overlayCandidate(shm)
+	if got.driver != "vfs" {
+		t.Errorf("overlayCandidate(%s) driver = %q, want vfs on tmpfs", shm, got.driver)
+	}
+	if got.reason == "" {
+		t.Error("rejection must explain itself")
 	}
 }
 
