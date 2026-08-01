@@ -93,34 +93,41 @@ func (c *Cleanup) AddPostRemoval(path string) {
 // space and fails the install with ENOSPC on modestly-sized disks.
 func (c *Cleanup) ReleaseScratch(path string) error {
 	wasMounted := false
-	mounts := c.mounts[:0]
 	for _, m := range c.mounts {
 		if m == path {
 			wasMounted = true
-			continue
+			break
 		}
-		mounts = append(mounts, m)
 	}
-	c.mounts = mounts
 
-	removals := c.postRemovals[:0]
-	for _, p := range c.postRemovals {
-		if p == path {
-			continue
-		}
-		removals = append(removals, p)
-	}
-	c.postRemovals = removals
-
+	// Deregister only what has actually been torn down. Dropping the
+	// registrations up front would mean a failed unmount silently leaks a
+	// multi-GB OCI cache onto the installed system, because Run() would no
+	// longer retry it.
 	if wasMounted {
 		if err := runner.Run("umount", "-R", path); err != nil {
 			return fmt.Errorf("unmounting scratch %s: %w", path, err)
 		}
+		c.mounts = withoutPath(c.mounts, path)
 	}
 	if err := RemoveAllFn(path); err != nil {
+		// Keep the post-removal registered so final teardown retries the
+		// delete once the rest of the mount stack is gone.
 		return fmt.Errorf("removing scratch %s: %w", path, err)
 	}
+	c.postRemovals = withoutPath(c.postRemovals, path)
 	return nil
+}
+
+// withoutPath returns paths with every occurrence of target removed.
+func withoutPath(paths []string, target string) []string {
+	kept := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p != target {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // Run unmounts all registered mount points in reverse order, then closes any

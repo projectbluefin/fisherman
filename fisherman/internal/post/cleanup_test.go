@@ -1,6 +1,7 @@
 package post_test
 
 import (
+	"errors"
 	"io"
 	"testing"
 
@@ -335,5 +336,100 @@ func TestCleanup_ReleaseScratchWithoutMount(t *testing.T) {
 
 	if len(rec.calls) != 1 || rec.calls[0].name != "removeAll" {
 		t.Fatalf("expected removeAll only (no umount), got %v", rec.calls)
+	}
+}
+
+// TestCleanup_ReleaseScratchKeepsRegistrationWhenUnmountFails asserts that a
+// failed early release does not disarm final teardown. Deregistering before the
+// unmount succeeded would leave a multi-GB OCI cache on the *installed system*
+// forever, because Run() would no longer retry it.
+func TestCleanup_ReleaseScratchKeepsRegistrationWhenUnmountFails(t *testing.T) {
+	rec := setupRecorder(t)
+	setupRemoveAllRecorder(t, rec)
+	rec.err = errors.New("target is busy")
+
+	const scratch = "/mnt/target/.fisherman-scratch"
+
+	var c post.Cleanup
+	c.AddMount("/mnt/target")
+	c.AddMount(scratch)
+	c.AddPostRemoval(scratch)
+
+	if err := c.ReleaseScratch(scratch); err == nil {
+		t.Fatal("ReleaseScratch should report the failed unmount")
+	}
+	// Nothing was removed: the unmount never succeeded.
+	for _, call := range rec.calls {
+		if call.name == "removeAll" {
+			t.Errorf("removeAll ran despite the unmount failing: %v", rec.calls)
+		}
+	}
+
+	// Final teardown must still try both the unmount and the delete.
+	rec.calls = nil
+	rec.err = nil
+	c.Run()
+
+	var sawUmount, sawRemove bool
+	for _, call := range rec.calls {
+		if call.name == "umount" && len(call.args) > 1 && call.args[1] == scratch {
+			sawUmount = true
+		}
+		if call.name == "removeAll" && call.args[0] == scratch {
+			sawRemove = true
+		}
+	}
+	if !sawUmount {
+		t.Errorf("Run() did not retry the unmount of %s: %v", scratch, rec.calls)
+	}
+	if !sawRemove {
+		t.Errorf("Run() did not retry the removal of %s — the cache would leak onto the installed system: %v", scratch, rec.calls)
+	}
+}
+
+// TestCleanup_ReleaseScratchRetriesRemovalWhenDeleteFails covers the middle
+// case: the unmount worked, so it must not be retried, but the delete did not,
+// so it must stay registered.
+func TestCleanup_ReleaseScratchRetriesRemovalWhenDeleteFails(t *testing.T) {
+	rec := setupRecorder(t)
+	old := post.RemoveAllFn
+	removeAttempts := 0
+	post.RemoveAllFn = func(path string) error {
+		removeAttempts++
+		rec.calls = append(rec.calls, execCall{name: "removeAll", args: []string{path}})
+		if removeAttempts == 1 {
+			return errors.New("directory not empty")
+		}
+		return nil
+	}
+	t.Cleanup(func() { post.RemoveAllFn = old })
+
+	const scratch = "/mnt/target/.fisherman-scratch"
+
+	var c post.Cleanup
+	c.AddMount(scratch)
+	c.AddPostRemoval(scratch)
+
+	if err := c.ReleaseScratch(scratch); err == nil {
+		t.Fatal("ReleaseScratch should report the failed removal")
+	}
+
+	rec.calls = nil
+	c.Run()
+
+	var sawUmount, sawRemove bool
+	for _, call := range rec.calls {
+		if call.name == "umount" && len(call.args) > 1 && call.args[1] == scratch {
+			sawUmount = true
+		}
+		if call.name == "removeAll" && call.args[0] == scratch {
+			sawRemove = true
+		}
+	}
+	if sawUmount {
+		t.Errorf("Run() re-unmounted an already-unmounted path: %v", rec.calls)
+	}
+	if !sawRemove {
+		t.Errorf("Run() did not retry the removal of %s: %v", scratch, rec.calls)
 	}
 }
