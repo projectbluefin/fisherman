@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   98% with the misleading `error writing hostname: write
   /mnt/fisherman-target/state/deploy/<hash>/etc/hostname`. `Cleanup.ReleaseScratch`
   now unmounts and deletes the cache immediately after `bootc install` returns.
+  A failed early release keeps its cleanup registrations so final teardown still
+  retries it — otherwise a busy unmount would leak the multi-GB cache onto the
+  installed system permanently.
 - **Full target disk fails loudly**: `tar` reports ENOSPC only on stderr, so the
   Flatpak copy step saw a bare `exit status 2`, downgraded it to a warning, and
   let the install limp on to fail later with an unrelated error. ENOSPC is now
