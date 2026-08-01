@@ -365,7 +365,7 @@ func bootcViaContainer(opts Options) error {
 	// avoids the copy entirely — working layers are created via mount namespaces —
 	// eliminating the memory pressure that kills podman during bootc install.
 	var nonComposefsRoot, nonComposefsRunRoot, nonComposefsDriver string
-	if !opts.ComposeFsBackend && defaultStorageSpaceConstrained() {
+	if !opts.ComposeFsBackend && StorageSpaceConstrainedFn() {
 		driver, reason := selectStorageDriver(scratch)
 		if driver == "overlay" {
 			progress.Substep(fmt.Sprintf("Redirecting podman storage to target disk with %s driver (%s)", driver, reason))

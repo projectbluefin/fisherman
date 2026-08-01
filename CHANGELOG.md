@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🐛 Bug Fixes
 
+- **Deterministic storage-redirect tests**: `TestBootcInstall_NonComposefsContainerExportsOCI`
+  asserted that the OCI export runs, but whether it runs depends on how the machine
+  executing the tests mounts `/var/lib/containers`. It failed on every host with
+  disk-backed podman storage, which is most of them — `go test ./...` was red on
+  `main`. The probe is now injectable via `install.StorageSpaceConstrainedFn`, and
+  both branches of the redirect decision are covered.
+
 - **Scratch OCI cache freed before post-install (ENOSPC → "error writing
   hostname")**: On live ISOs the scratch dir holding several GB of extracted
   image blobs lives on the *target* disk. It was only deleted by the final

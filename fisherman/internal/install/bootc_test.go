@@ -203,7 +203,7 @@ func TestBuildBootcArgs_NoComposeFsBackend_NoSourceImgref(t *testing.T) {
 // directory" when the OCI layout was exported but the flag was missing.
 func TestBuildBootcArgs_OCIPathWithoutComposefs(t *testing.T) {
 	args := install.BuildBootcArgs(install.Options{
-		ComposeFsBackend:  false,
+		ComposeFsBackend: false,
 		ComposeFsOCIPath: "/run/fisherman/oci-cache",
 	}, "", "/target")
 	assertContains(t, args, "--source-imgref")
@@ -569,6 +569,13 @@ func TestBootcInstall_NonComposefsContainerExportsOCI(t *testing.T) {
 	}
 	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
 
+	// The OCI export only happens when podman storage is redirected onto the
+	// target disk, and that is decided by probing how /var/lib/containers is
+	// mounted on the machine running the test. Pin the probe so the assertion
+	// tests fisherman's logic rather than the runner's filesystem layout.
+	install.StorageSpaceConstrainedFn = func() bool { return true }
+	defer func() { install.StorageSpaceConstrainedFn = install.DefaultStorageSpaceConstrained }()
+
 	// The overlay redirect requires scratch on an overlay-capable filesystem
 	// (ext4/xfs/btrfs).  t.TempDir() is typically on tmpfs.  Use /var/tmp
 	// which is usually ext4/xfs on CI and developer machines.
@@ -630,5 +637,55 @@ func TestBootcInstall_NonComposefsDirectSkipsOCIExport(t *testing.T) {
 	}
 	if exportCalled {
 		t.Error("SkopeoExportOCIFn was called for non-composefs direct mode (should be skipped)")
+	}
+}
+
+// TestBootcInstall_NonComposefsSkipsOCIExportWhenStorageIsDiskBacked is the
+// other half of the redirect decision. When podman's default storage is already
+// disk-backed there is nothing to gain from redirecting onto the target, and the
+// OCI export must be skipped — exporting anyway lands three copies of the image
+// inside the target (containers-root + oci-cache + the deployment) and overflows
+// fixed-size disks.
+func TestBootcInstall_NonComposefsSkipsOCIExportWhenStorageIsDiskBacked(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	podmanPath := tmpDir + "/podman"
+	if err := os.WriteFile(podmanPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing fake podman: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", tmpDir+":"+oldPath); err != nil {
+		t.Fatalf("setting PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
+
+	var exportCalled bool
+	install.SkopeoExportOCIFn = func(image, destDir, tmpdir string) error {
+		exportCalled = true
+		return nil
+	}
+	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
+
+	install.StorageSpaceConstrainedFn = func() bool { return false }
+	defer func() { install.StorageSpaceConstrainedFn = install.DefaultStorageSpaceConstrained }()
+
+	scratchDir, err := os.MkdirTemp("/var/tmp", "fisherman-test-scratch-*")
+	if err != nil {
+		t.Skipf("cannot create scratch on /var/tmp: %v", err)
+	}
+	defer os.RemoveAll(scratchDir)
+
+	if err := install.BootcInstall(install.Options{
+		ComposeFsBackend: false,
+		SourceImgref:     "containers-storage:ghcr.io/projectbluefin/bluefin:stable",
+		TargetImgref:     "ghcr.io/projectbluefin/bluefin:stable",
+		Target:           tmpDir + "/target",
+		ScratchDir:       scratchDir,
+		NeedsPull:        false,
+	}); err != nil {
+		t.Fatalf("BootcInstall() error = %v", err)
+	}
+	if exportCalled {
+		t.Error("OCI export ran even though podman storage was already disk-backed")
 	}
 }

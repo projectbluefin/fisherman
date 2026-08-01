@@ -99,7 +99,13 @@ func filesystemType(path string) (string, error) {
 	return fmt.Sprintf("unknown(0x%x)", st.Type), nil
 }
 
-// defaultStorageSpaceConstrained reports whether podman's default storage
+// StorageSpaceConstrainedFn is the probe consulted before redirecting podman
+// storage onto the target disk. Tests replace this so the redirect decision does
+// not depend on how the machine running the tests happens to mount
+// /var/lib/containers; restore with DefaultStorageSpaceConstrained.
+var StorageSpaceConstrainedFn = DefaultStorageSpaceConstrained
+
+// DefaultStorageSpaceConstrained reports whether podman's default storage
 // location lives on a memory-backed filesystem (tmpfs/ramfs/overlayfs) where
 // a multi-gigabyte image pull would exhaust RAM. When the host has already
 // provided disk-backed storage there (e.g. the wootc deployer bind-mounts an
@@ -107,7 +113,7 @@ func filesystemType(path string) (string, error) {
 // is wasteful: it forces the OCI-export path, which lands three copies of the
 // image inside the target (containers-root + oci-cache + the deployment) and
 // overflows fixed-size targets.
-func defaultStorageSpaceConstrained() bool {
+func DefaultStorageSpaceConstrained() bool {
 	for _, p := range []string{"/var/lib/containers", "/var"} {
 		if fsType, err := filesystemType(p); err == nil {
 			return fsType == "tmpfs" || fsType == "ramfs" || fsType == "overlayfs"
