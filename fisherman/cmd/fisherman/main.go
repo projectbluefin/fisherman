@@ -664,6 +664,18 @@ func main() {
 		fatal("bootc install: %v", err)
 	}
 
+	// Reclaim the scratch OCI cache now that bootc no longer needs it. On live
+	// ISOs scratchDir sits on the target disk and holds several GB of extracted
+	// image blobs; holding it until final cleanup leaves the remaining
+	// post-install steps (flatpak copy, hostname write, fstab) writing into a
+	// nearly-full filesystem and fails the install with ENOSPC — surfaced to
+	// the user as the misleading "error writing hostname".
+	if err := cleanup.ReleaseScratch(scratchDir); err != nil {
+		progress.Info(fmt.Sprintf("Warning: could not release scratch dir %s: %v", scratchDir, err))
+	} else {
+		progress.Info(fmt.Sprintf("Released scratch cache %s", scratchDir))
+	}
+
 	// systemd-boot composefs installs rely on GPT auto-discovery for the root
 	// filesystem. Keep the auto-partitioned root on the architecture-specific
 	// Linux root GUID so the installed system can find /sysroot on first boot.
@@ -737,6 +749,12 @@ func main() {
 	step++
 
 	if err := post.CopyFlatpaks(activeTargetMount, r.Flatpaks, r.FlatpakVarPath); err != nil {
+		// A full target disk is never recoverable: every later post-install
+		// write fails too, and the user ends up staring at an unrelated
+		// "error writing hostname". Fail loudly here instead.
+		if post.IsNoSpace(err) {
+			fatal("target disk is full — %s is too small for this image: %v", r.Disk, err)
+		}
 		// Non-fatal — the system will work without pre-installed flatpaks.
 		progress.Info(fmt.Sprintf("Warning: could not copy flatpaks: %v", err))
 	}

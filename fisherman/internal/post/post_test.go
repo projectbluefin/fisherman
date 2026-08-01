@@ -1,11 +1,13 @@
 package post_test
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/tuna-os/fisherman/internal/post"
@@ -919,5 +921,30 @@ func TestCopyFlatpaks_RemovesInstallerApps_CustomFlatpakVarPath(t *testing.T) {
 
 	if _, err := os.Stat(appDir); err == nil {
 		t.Errorf("installer app dir still exists at custom flatpakVarPath: %s", appDir)
+	}
+}
+
+// TestIsNoSpace covers both shapes an ENOSPC failure arrives in: a wrapped
+// syscall error (tar extract, translated from its stderr) and raw strerror
+// text scraped from a subprocess (tee, cp, mkdir).
+func TestIsNoSpace(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"wrapped ENOSPC", fmt.Errorf("tar extract: %w", syscall.ENOSPC), true},
+		{"bare ENOSPC", syscall.ENOSPC, true},
+		{"strerror text", errors.New("tee: /mnt/t/etc/hostname: No space left on device"), true},
+		{"unrelated", errors.New("exit status 2"), false},
+		{"permission", syscall.EACCES, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := post.IsNoSpace(tc.err); got != tc.want {
+				t.Errorf("IsNoSpace(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

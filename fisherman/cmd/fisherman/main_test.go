@@ -233,3 +233,67 @@ func TestCheckRequiredTools_SystemdCryptenrollNotCheckedForPlainLUKS(t *testing.
 		t.Errorf("systemd-cryptenroll should not be checked for luks-passphrase, got: %v", err)
 	}
 }
+
+// TestInstallFlow_ReleasesScratchBeforePostInstall is a source-order invariant:
+// the scratch OCI cache (multi-GB, on the target disk for live ISOs) must be
+// released immediately after `bootc install`, before any post-install step
+// writes to the target. Regression gate for the ENOSPC failure that surfaced
+// to users as "error writing hostname".
+func TestInstallFlow_ReleasesScratchBeforePostInstall(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("reading main.go: %v", err)
+	}
+	body := string(src)
+
+	release := strings.Index(body, "cleanup.ReleaseScratch(scratchDir)")
+	if release == -1 {
+		t.Fatal("main.go must call cleanup.ReleaseScratch(scratchDir) after bootc install")
+	}
+	install := strings.Index(body, "install.BootcInstall(install.Options{")
+	if install == -1 {
+		t.Fatal("could not locate install.BootcInstall call in main.go")
+	}
+	if release < install {
+		t.Errorf("ReleaseScratch at %d runs before BootcInstall at %d", release, install)
+	}
+
+	for _, postStep := range []string{
+		"post.CopyFlatpaks(activeTargetMount",
+		"post.WriteHostname(activeTargetMount",
+	} {
+		idx := strings.Index(body, postStep)
+		if idx == -1 {
+			t.Fatalf("could not locate %q in main.go", postStep)
+		}
+		if idx < release {
+			t.Errorf("%s at %d runs before ReleaseScratch at %d — scratch cache still occupies the target disk", postStep, idx, release)
+		}
+	}
+}
+
+// TestCopyFlatpaksFailure_FatalOnFullDisk asserts a full target disk aborts the
+// install with a clear message instead of being downgraded to a warning that
+// lets the run limp on and fail later with an unrelated error.
+func TestCopyFlatpaksFailure_FatalOnFullDisk(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("reading main.go: %v", err)
+	}
+	body := string(src)
+
+	copyIdx := strings.Index(body, "post.CopyFlatpaks(activeTargetMount")
+	if copyIdx == -1 {
+		t.Fatal("could not locate post.CopyFlatpaks call in main.go")
+	}
+	block := body[copyIdx:]
+	if end := strings.Index(block, "── Step 8"); end != -1 {
+		block = block[:end]
+	}
+	if !strings.Contains(block, "post.IsNoSpace(err)") {
+		t.Error("flatpak copy failure must check post.IsNoSpace(err)")
+	}
+	if !strings.Contains(block, "fatal(") {
+		t.Error("flatpak copy failure on a full disk must be fatal, not a warning")
+	}
+}

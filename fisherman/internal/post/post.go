@@ -2,6 +2,7 @@ package post
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/tuna-os/fisherman/internal/luks"
@@ -23,6 +25,42 @@ var Exec runner.Executor = runner.DefaultExecutor
 // RemoveAllFn is a hook for tests to override os.RemoveAll behavior.
 // Normally set to os.RemoveAll, but tests can replace it.
 var RemoveAllFn = os.RemoveAll
+
+// noSpaceMsg is the strerror(ENOSPC) text that coreutils and tar print.
+const noSpaceMsg = "No space left on device"
+
+// IsNoSpace reports whether err was caused by the target filesystem running
+// out of space. Some helpers surface ENOSPC as a wrapped syscall error, others
+// only as text scraped from a subprocess's stderr, so both are checked.
+func IsNoSpace(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	return strings.Contains(err.Error(), noSpaceMsg)
+}
+
+// capWriter keeps the first limit bytes written to it and discards the rest,
+// so a subprocess that floods stderr (tar emits one line per failed member)
+// cannot balloon memory while still preserving the first, causal error.
+type capWriter struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if remaining := w.limit - w.buf.Len(); remaining > 0 {
+		if len(p) < remaining {
+			remaining = len(p)
+		}
+		w.buf.Write(p[:remaining])
+	}
+	return len(p), nil
+}
+
+func (w *capWriter) String() string { return w.buf.String() }
 
 // Cleanup tracks mounted filesystems and an open LUKS device so they can be
 // torn down in the correct order on both success and error paths.
@@ -43,6 +81,46 @@ func (c *Cleanup) SetLUKS(name string)  { c.luksMapper = name }
 // os.Exit(1) would otherwise skip a deferred RemoveAll.
 func (c *Cleanup) AddPostRemoval(path string) {
 	c.postRemovals = append(c.postRemovals, path)
+}
+
+// ReleaseScratch tears down a scratch path early — before Run() — and
+// deregisters it so Run() does not try to unmount or delete it again.
+//
+// On live ISOs the scratch directory lives on the *target* disk and holds
+// several GB of extracted OCI blobs. Once `bootc install` has finished, that
+// cache is dead weight: leaving it in place until final cleanup starves the
+// remaining post-install steps (flatpak copy, hostname write, fstab) of disk
+// space and fails the install with ENOSPC on modestly-sized disks.
+func (c *Cleanup) ReleaseScratch(path string) error {
+	wasMounted := false
+	mounts := c.mounts[:0]
+	for _, m := range c.mounts {
+		if m == path {
+			wasMounted = true
+			continue
+		}
+		mounts = append(mounts, m)
+	}
+	c.mounts = mounts
+
+	removals := c.postRemovals[:0]
+	for _, p := range c.postRemovals {
+		if p == path {
+			continue
+		}
+		removals = append(removals, p)
+	}
+	c.postRemovals = removals
+
+	if wasMounted {
+		if err := runner.Run("umount", "-R", path); err != nil {
+			return fmt.Errorf("unmounting scratch %s: %w", path, err)
+		}
+	}
+	if err := RemoveAllFn(path); err != nil {
+		return fmt.Errorf("removing scratch %s: %w", path, err)
+	}
+	return nil
 }
 
 // Run unmounts all registered mount points in reverse order, then closes any
@@ -400,7 +478,8 @@ func CopyFlatpaks(target string, wantedRefs []string, flatpakVarPath string) err
 	tarC.SetStderr(os.Stdout)
 	tarX.SetStdin(cr)
 	tarX.SetStdout(os.Stdout)
-	tarX.SetStderr(os.Stdout)
+	tarXErr := &capWriter{limit: 8 << 10}
+	tarX.SetStderr(io.MultiWriter(os.Stdout, tarXErr))
 
 	if err := tarX.Start(); err != nil {
 		pw.Close()
@@ -446,6 +525,11 @@ func CopyFlatpaks(target string, wantedRefs []string, flatpakVarPath string) err
 		return fmt.Errorf("tar create: %w", errC)
 	}
 	if errX != nil {
+		// tar reports ENOSPC only on its stderr, so the exit status alone
+		// ("exit status 2") hides the one cause the caller must react to.
+		if strings.Contains(tarXErr.String(), noSpaceMsg) {
+			return fmt.Errorf("tar extract: %w", syscall.ENOSPC)
+		}
 		return fmt.Errorf("tar extract: %w", errX)
 	}
 
