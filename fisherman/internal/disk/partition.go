@@ -151,12 +151,31 @@ func PartitionEncrypted(disk string) error {
 // without running out of space even if stale entries accumulate.
 // This layout is used for both unencrypted and encrypted systemd-boot installs
 // (encrypted: LUKS wraps partition 2).
+//
+// The root partition is typed with the Discoverable Partitions Specification's
+// architecture-specific root GUID rather than the generic `linux` alias, because
+// systemd-gpt-auto-generator is the only thing that can find the root filesystem
+// when the bootloader entry's cmdline cannot be edited. That is the case for a
+// Unified Kernel Image: the cmdline is measured and signed inside the UKI, so
+// EnsureLuksArgs' `rd.luks.name=<UUID>=root` never reaches the kernel and there is
+// no BLS entry to append it to. An encrypted UKI install typed `linux` therefore
+// hangs ~90s on dev-gpt-auto-root.device and drops to an emergency console, which
+// on a locked-root image nobody can log into.
+//
+// Typing it here rather than retagging after install also avoids a busy-device
+// problem: for encrypted installs partition 2 holds an open LUKS container by then,
+// so `sfdisk --part-type` would be fighting a mapper that later steps still need. At
+// partition time nothing references it yet.
+//
+// Per the specification an encrypted root partition carries the same root GUID — the
+// LUKS container on it is expected, and is what lets systemd unlock and mount it
+// with no cmdline hint at all.
 func PartitionSystemdBoot(disk string) error {
 	script := strings.Join([]string{
 		"label: gpt",
 		"",
 		`size=2GiB, type=uefi, name="EFI-SYSTEM"`,
-		`type=linux, name="root"`,
+		`type=` + GPTPartTypeLinuxRootX86_64 + `, name="root"`,
 	}, "\n") + "\n"
 	return partition(disk, script)
 }
