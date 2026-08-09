@@ -420,14 +420,14 @@ func bootcViaContainer(opts Options) error {
 			storageDriver = nonComposefsDriver
 		}
 
-			// Clear any previous podman database to avoid driver-mismatch errors;
-			// the early RemoveAll when nonComposefsRoot is set handles this for
-			// the non-composefs path, so only do it for composefs here.
-			if opts.ComposeFsBackend {
-				if err := os.RemoveAll(nonComposefsRoot); err != nil && !os.IsNotExist(err) {
-					progress.Substep(fmt.Sprintf("Warning: could not clear previous podman database: %v", err))
-				}
+		// Clear any previous podman database to avoid driver-mismatch errors;
+		// the early RemoveAll when nonComposefsRoot is set handles this for
+		// the non-composefs path, so only do it for composefs here.
+		if opts.ComposeFsBackend {
+			if err := os.RemoveAll(nonComposefsRoot); err != nil && !os.IsNotExist(err) {
+				progress.Substep(fmt.Sprintf("Warning: could not clear previous podman database: %v", err))
 			}
+		}
 
 		progress.Substep(fmt.Sprintf("Using %s storage driver with OCI layout", storageDriver))
 		podmanArgs = append(podmanArgs,
@@ -790,6 +790,15 @@ func injectStorageTmpDir(conf, newLine string) string {
 // /etc/containers/storage.conf), so we supply an explicit config file.
 //
 // The caller must remove the returned path when done.
+// NOTE: currently unreferenced. It arrived in e6ea536 ("override
+// CONTAINERS_STORAGE_CONF tmpdir to prevent ENOSPC on live ISO") and was
+// orphaned by 74993bb, which replaced that approach with a two-stage export.
+// Suppressed rather than deleted because removing code from a path that
+// exists to work around a live-ISO ENOSPC failure is the maintainers' call,
+// not a lint fix — if it is genuinely dead, deleting it is better than this
+// directive.
+//
+//nolint:unused // orphaned by 74993bb; keep or delete is a maintainer decision
 func writeStorageConfWithTmpDir(confDir, scratchDir string) (string, error) {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		return "", err
@@ -862,7 +871,11 @@ func skopeoExportOCI(image, destDir, tmpdir string) error {
 			fmt.Fprintf(os.Stdout, "# /var/tmp bind-mounted → %s for blob staging\n", varTmpOverride)
 			defer func() {
 				umName, umArgs := runner.HostArgs("umount", []string{"/var/tmp"})
-				exec.Command(umName, umArgs...).Run()
+				// Best-effort teardown in a defer: if the unmount fails there
+				// is nothing useful left to do about it, and the install
+				// result must not change because cleanup was untidy. Discard
+				// explicitly so that intent is visible (and errcheck-clean).
+				_ = exec.Command(umName, umArgs...).Run()
 			}()
 		} else {
 			fmt.Fprintf(os.Stdout, "# warning: /var/tmp bind-mount failed — ENOSPC likely on overlay tmpfs\n")

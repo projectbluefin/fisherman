@@ -91,13 +91,13 @@ func shouldHide(dev AudioDevice) bool {
 	desc := strings.ToLower(dev.Description)
 
 	hidePatterns := []string{
-		"iec958",         // S/PDIF digital output
-		"spdif",          // S/PDIF alternate spelling
-		"s/pdif",         // S/PDIF with slash
-		"digital output", // generic digital
+		"iec958",                  // S/PDIF digital output
+		"spdif",                   // S/PDIF alternate spelling
+		"s/pdif",                  // S/PDIF with slash
+		"digital output",          // generic digital
 		"digital stereo (iec958)", // PulseAudio-style
-		"pro audio",      // raw multi-channel, not for consumers
-		"multichannel",   // multi-channel raw
+		"pro audio",               // raw multi-channel, not for consumers
+		"multichannel",            // multi-channel raw
 	}
 
 	for _, p := range hidePatterns {

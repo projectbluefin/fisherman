@@ -347,9 +347,9 @@ func GenerateSystemThumbnails(target string, composeFsNative bool) int {
 			continue
 		}
 
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
-				return nil
+				return nil //nolint:nilerr // skip this entry and keep walking; a partial scan is intended
 			}
 			// Skip tiny files and non-images
 			if info.Size() < 10*1024 {
@@ -364,7 +364,7 @@ func GenerateSystemThumbnails(target string, composeFsNative bool) int {
 			var installedPath string
 			relToTarget, err := filepath.Rel(target, path)
 			if err != nil {
-				return nil
+				return nil //nolint:nilerr // skip this entry and keep walking; a partial scan is intended
 			}
 			installedPath = "/" + relToTarget
 
@@ -444,9 +444,9 @@ func CleanupScratch() {
 // dirSize returns total bytes of all files under a directory.
 func dirSize(path string) int64 {
 	var total int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
-			return nil
+			return nil //nolint:nilerr // skip this entry and keep walking; a partial scan is intended
 		}
 		total += info.Size()
 		return nil

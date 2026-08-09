@@ -101,7 +101,25 @@ func formatPartition(dev, fstype string) error {
 	case "fat32":
 		return runner.Run("mkfs.fat", "-F32", dev)
 	case "ext4":
-		return runner.Run("mkfs.ext4", "-F", dev)
+		// -O verity, matching FormatRoot in format.go. bootc's
+		// --composefs-backend calls FS_IOC_ENABLE_VERITY on individual objects
+		// as it writes them, and ext4 only permits that when the verity feature
+		// was enabled at format time — it cannot be turned on afterwards.
+		//
+		// Without this, the auto-partition path supports composefs and the
+		// custom-layout path silently does not, though the recipes differ only
+		// by customMounts. It fails as
+		//
+		//   Finalizing object tempfile: Enabling verity on tmpfile:
+		//   Filesystem does not support fs-verity
+		//
+		// deep in the deploy, AFTER the target is formatted and the image
+		// pulled. Every host that installs into pre-existing partitions rather
+		// than repartitioning uses this path exclusively, so they were the ones
+		// that could never use composefs.
+		//
+		// The flag is inert on non-composefs installs.
+		return runner.Run("mkfs.ext4", "-F", "-O", "verity", dev)
 	case "ext3":
 		return runner.Run("mkfs.ext3", "-F", dev)
 	case "xfs":

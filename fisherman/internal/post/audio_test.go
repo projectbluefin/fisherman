@@ -210,12 +210,12 @@ type mockAudioCommand struct {
 	output string
 }
 
-func (c *mockAudioCommand) Run() error                { return nil }
-func (c *mockAudioCommand) Start() error              { return nil }
-func (c *mockAudioCommand) Wait() error               { return nil }
-func (c *mockAudioCommand) SetStdin(r io.Reader)      {}
-func (c *mockAudioCommand) SetStdout(w io.Writer)     {}
-func (c *mockAudioCommand) SetStderr(w io.Writer)     {}
+func (c *mockAudioCommand) Run() error            { return nil }
+func (c *mockAudioCommand) Start() error          { return nil }
+func (c *mockAudioCommand) Wait() error           { return nil }
+func (c *mockAudioCommand) SetStdin(r io.Reader)  {}
+func (c *mockAudioCommand) SetStdout(w io.Writer) {}
+func (c *mockAudioCommand) SetStderr(w io.Writer) {}
 func (c *mockAudioCommand) Output() ([]byte, error) {
 	if c.name == "pw-cli" {
 		return []byte(c.output), nil

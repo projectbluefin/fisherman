@@ -192,7 +192,7 @@ func TestBuildBootcArgs_NoComposeFsBackend_NoSourceImgref(t *testing.T) {
 // directory" when the OCI layout was exported but the flag was missing.
 func TestBuildBootcArgs_OCIPathWithoutComposefs(t *testing.T) {
 	args := install.BuildBootcArgs(install.Options{
-		ComposeFsBackend:  false,
+		ComposeFsBackend: false,
 		ComposeFsOCIPath: "/run/fisherman/oci-cache",
 	}, "", "/target")
 	assertContains(t, args, "--source-imgref")

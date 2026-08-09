@@ -8,13 +8,43 @@ import (
 )
 
 func TestSelectStorageDriver_NonComposefs(t *testing.T) {
-	// Non-composefs also probes overlay now; /tmp is usually tmpfs so should fall back to vfs.
-	driver, reason := selectStorageDriver("/tmp")
-	if driver != "vfs" {
-		t.Errorf("non-composefs driver = %q, want vfs", driver)
+	// This asserted `driver == "vfs"` on the premise that "/tmp is usually
+	// tmpfs" — a property of the HOST, not of the code. It holds on a
+	// developer box where /tmp is a tmpfs mount and fails on CI runners, where
+	// /tmp lives on the ext4 root: overlay is then a legitimate answer, and the
+	// test reported a bug that did not exist.
+	//
+	// TestOverlayCandidate_UnsafeFilesystems below already guards for this;
+	// this one never got the same treatment.
+	//
+	// So: detect what /tmp actually is, and assert the branch that applies.
+	// Skipping outright would be the easy fix, but it would leave CI — where
+	// /tmp is NOT tmpfs — asserting nothing at all, which is where the
+	// regression risk actually lives.
+	fsType, err := filesystemType("/tmp")
+	if err != nil {
+		t.Fatalf("filesystemType(/tmp): %v", err)
 	}
+
+	driver, reason := selectStorageDriver("/tmp")
 	if reason == "" {
 		t.Error("non-composefs reason should not be empty")
+	}
+
+	if fsType == "tmpfs" || fsType == "overlayfs" {
+		// Unsafe for overlay, so the fallback is mandatory.
+		if driver != "vfs" {
+			t.Errorf("driver on %s = %q, want vfs (%s cannot back overlay)", fsType, driver, fsType)
+		}
+		return
+	}
+
+	// On any other filesystem the answer depends on whether podman can
+	// actually set up overlay here, which we do not control. Both outcomes are
+	// correct; what must hold is that the result is one of the two and carries
+	// an explanation.
+	if driver != "overlay" && driver != "vfs" {
+		t.Errorf("driver on %s = %q, want overlay or vfs", fsType, driver)
 	}
 }
 

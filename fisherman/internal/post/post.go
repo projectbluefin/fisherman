@@ -549,13 +549,13 @@ func CopyBluetoothPairings(target string) error {
 	const src = "/var/lib/bluetooth"
 	info, err := os.Stat(src)
 	if err != nil || !info.IsDir() {
-		return nil // no bluetooth data — nothing to do
+		return nil //nolint:nilerr // an absent optional source is not an install failure (no bluetooth data — nothing to do)
 	}
 
 	// Check if the directory has any adapter subdirectories.
 	entries, err := os.ReadDir(src)
 	if err != nil || len(entries) == 0 {
-		return nil
+		return nil //nolint:nilerr // an absent optional source is not an install failure
 	}
 
 	// Resolve the target /var/lib/bluetooth path (composefs-native vs ostree).
@@ -589,12 +589,12 @@ func CopyWiFiConnections(target string) error {
 	const src = "/etc/NetworkManager/system-connections"
 	info, err := os.Stat(src)
 	if err != nil || !info.IsDir() {
-		return nil // no NM connections — nothing to do
+		return nil //nolint:nilerr // an absent optional source is not an install failure (no NM connections — nothing to do)
 	}
 
 	entries, err := os.ReadDir(src)
 	if err != nil || len(entries) == 0 {
-		return nil
+		return nil //nolint:nilerr // an absent optional source is not an install failure
 	}
 
 	// Only copy .nmconnection files (skip other config).
@@ -662,7 +662,6 @@ func EnablePrintServices(target string) {
 	}
 	progress.Info("Print services enabled: cups-browsed, avahi-daemon, ipp-usb")
 }
-
 
 // AppendFstabEntry appends an fstab entry to the installed system at target.
 // Works for both composefs-native and ostree-based deployments.

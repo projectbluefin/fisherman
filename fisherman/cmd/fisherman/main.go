@@ -62,7 +62,7 @@ func buildProfile(needsPull, hasLUKS, hasTPM2enrolment, hasVarDiskFormat bool) [
 	if hasLUKS {
 		weights = append(weights, 1) // LUKS setup
 	}
-	weights = append(weights, 0, 0)     // format root, mount
+	weights = append(weights, 0, 0) // format root, mount
 	if hasVarDiskFormat {
 		weights = append(weights, 0) // format /var disk (fast)
 	}
@@ -384,8 +384,8 @@ func main() {
 
 	var activeTargetMount string
 	var activeEfiPart string
-	var activeRootPart string // only used for TPM2 enrolment, empty in manual mode
-	var activeLuksUUID string // LUKS partition UUID for boot entry injection; empty if no encryption
+	var activeRootPart string  // only used for TPM2 enrolment, empty in manual mode
+	var activeLuksUUID string  // LUKS partition UUID for boot entry injection; empty if no encryption
 	var luksRecoveryKey string // random passphrase for tpm2-luks (emitted as recovery key)
 
 	if isManual {
