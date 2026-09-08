@@ -302,8 +302,18 @@ func TestPartitionSystemdBoot_SfdiskScript(t *testing.T) {
 	if strings.Contains(rootLine, "size=") {
 		t.Errorf("root partition should have no size= (fills remaining space), got: %q", rootLine)
 	}
-	if !strings.Contains(rootLine, "type=linux") {
-		t.Errorf("root partition missing type=linux: %q", rootLine)
+	// Root must carry the Discoverable Partitions root GUID, not the generic
+	// `linux` alias. With a Unified Kernel Image the cmdline is signed inside the
+	// image, so EnsureLuksArgs cannot inject rd.luks.name= and there is no BLS
+	// entry to edit; systemd-gpt-auto-generator is then the only way the root is
+	// ever found. Typed `linux`, an encrypted install hangs ~90s on
+	// dev-gpt-auto-root.device and lands in an emergency shell.
+	if !strings.Contains(rootLine, "type="+disk.GPTPartTypeLinuxRootX86_64) {
+		t.Errorf("root partition must be typed %s, got: %q",
+			disk.GPTPartTypeLinuxRootX86_64, rootLine)
+	}
+	if strings.Contains(rootLine, "type=linux") {
+		t.Errorf("root partition still uses the generic linux alias: %q", rootLine)
 	}
 }
 
