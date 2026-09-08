@@ -4,60 +4,97 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tuna-os/fisherman/internal/install"
 )
 
+// allowRegistryPull forces the host-filesystem live-ISO probe off so CheckImage
+// tests exercise the registry/local comparison regardless of the runner's own
+// /var filesystem type (which may be overlayfs/tmpfs in CI containers).
+func allowRegistryPull(t *testing.T) {
+	t.Helper()
+	install.HostVarConstrainedFn = func() bool { return false }
+	t.Cleanup(func() { install.HostVarConstrainedFn = install.DefaultHostVarConstrained })
+}
+
+// stubHostVarTmpBind replaces the real host /var/tmp binder (which issues
+// mount/umount syscalls against the host namespace) with a no-op so install-path
+// tests don't require privileges or modify the test host's /var/tmp. The stub
+// records the scratch dir it was invoked with.
+func stubHostVarTmpBind(t *testing.T) *string {
+	t.Helper()
+	scratch := ""
+	install.HostVarTmpBindFn = func(s string) (func(), error) {
+		scratch = s
+		return func() {}, nil
+	}
+	t.Cleanup(func() { install.HostVarTmpBindFn = install.DefaultHostVarTmpBind })
+	return &scratch
+}
+
 func TestCheckImage_NeedsPullWhenNotCached(t *testing.T) {
+	allowRegistryPull(t)
 	call := 0
 	install.SkopeoInspectFn = func(args ...string) ([]byte, error) {
 		call++
 		if call == 1 {
-			// Remote inspect: return manifest with digest + layers
-			return []byte(`{"Digest":"sha256:aaaa","Layers":["sha256:l1","sha256:l2"]}`), nil
+			// Local must be probed first…
+			if len(args) == 0 || !strings.HasPrefix(args[0], "containers-storage:") {
+				t.Errorf("local containers-storage must be checked first, got: %v", args)
+			}
+			// …and is not found here.
+			return nil, fmt.Errorf("image not known")
 		}
-		// Local inspect: not found
-		return nil, fmt.Errorf("image not known")
+		// Remote inspect: reachable, return manifest with digest + layers
+		return []byte(`{"Digest":"sha256:aaaa","Layers":["sha256:l1","sha256:l2"]}`), nil
 	}
 	defer func() { install.SkopeoInspectFn = install.DefaultSkopeoInspect }()
 
 	result := install.CheckImage("ghcr.io/tuna-os/yellowfin:gnome-hwe")
 	if !result.NeedsPull {
-		t.Error("NeedsPull should be true when image not in local storage")
+		t.Error("NeedsPull should be true when no local copy but the registry is reachable")
 	}
 	if result.LayerCount != 2 {
 		t.Errorf("LayerCount = %d, want 2", result.LayerCount)
 	}
 }
 
-func TestCheckImage_NoPullWhenCachedAndCurrent(t *testing.T) {
+func TestCheckImage_UseLocalCopyWhenCached(t *testing.T) {
+	allowRegistryPull(t)
 	install.SkopeoInspectFn = func(args ...string) ([]byte, error) {
-		// Both remote and local return same digest
+		if strings.HasPrefix(args[0], "docker://") {
+			t.Errorf("registry must not be probed when a local copy exists, got: %v", args)
+			return nil, fmt.Errorf("registry must not be contacted")
+		}
 		return []byte(`{"Digest":"sha256:bbbb","Layers":["sha256:l1","sha256:l2","sha256:l3"]}`), nil
 	}
 	defer func() { install.SkopeoInspectFn = install.DefaultSkopeoInspect }()
 
 	result := install.CheckImage("ghcr.io/tuna-os/yellowfin:gnome-hwe")
 	if result.NeedsPull {
-		t.Error("NeedsPull should be false when local digest matches remote")
+		t.Error("NeedsPull should be false when a local copy exists")
 	}
 	if result.LayerCount != 3 {
 		t.Errorf("LayerCount = %d, want 3", result.LayerCount)
 	}
+	if result.Offline {
+		t.Error("Offline should be false: registry reachability is irrelevant when local copy exists")
+	}
 }
 
 func TestCheckImage_LocalImagePreferredOverNewer(t *testing.T) {
-	// When the local image exists but has a different digest than the remote
+	allowRegistryPull(t)
+	// When a local copy exists but has a different digest than the remote
 	// (i.e. remote is newer), we still use the local image.  The ISO embeds
 	// a specific image version for offline install; post-install updates are
 	// handled by `bootc update`, not by re-pulling during installation.
-	call := 0
 	install.SkopeoInspectFn = func(args ...string) ([]byte, error) {
-		call++
-		if call == 1 {
-			return []byte(`{"Digest":"sha256:remote-newer","Layers":["sha256:l1"]}`), nil
+		if strings.HasPrefix(args[0], "docker://") {
+			t.Errorf("registry must not be probed when a local copy exists, got: %v", args)
+			return nil, fmt.Errorf("registry must not be contacted")
 		}
 		return []byte(`{"Digest":"sha256:local-embedded","Layers":["sha256:l1"]}`), nil
 	}
@@ -65,14 +102,15 @@ func TestCheckImage_LocalImagePreferredOverNewer(t *testing.T) {
 
 	result := install.CheckImage("ghcr.io/tuna-os/yellowfin:gnome-hwe")
 	if result.NeedsPull {
-		t.Error("NeedsPull should be false when local image exists, even if remote is newer")
+		t.Error("NeedsPull should be false when a local copy exists, even if remote is newer")
 	}
 	if result.Offline {
 		t.Error("Offline should be false when remote is reachable")
 	}
 }
 
-func TestCheckImage_NeedsPullOnNetworkErrorNoCachedImage(t *testing.T) {
+func TestCheckImage_UnreachableRegistryNoLocalCopyNeedsPull(t *testing.T) {
+	allowRegistryPull(t)
 	install.SkopeoInspectFn = func(args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("network error")
 	}
@@ -80,35 +118,48 @@ func TestCheckImage_NeedsPullOnNetworkErrorNoCachedImage(t *testing.T) {
 
 	result := install.CheckImage("ghcr.io/tuna-os/yellowfin:gnome-hwe")
 	if !result.NeedsPull {
-		t.Error("NeedsPull should be true when offline and image not in local storage")
+		t.Error("NeedsPull should be true when no local copy exists, even if registry probe failed")
 	}
 	if result.Offline {
-		t.Error("Offline should be false when image is not in local storage")
+		t.Error("Offline should be false when image is not present in local storage")
 	}
 }
 
-func TestCheckImage_OfflineWithLocalCache(t *testing.T) {
-	call := 0
+func TestCheckImage_LiveEnvironmentNeverPulls(t *testing.T) {
+	install.HostVarConstrainedFn = func() bool { return true }
+	defer func() { install.HostVarConstrainedFn = install.DefaultHostVarConstrained }()
+
+	// On a live host the registry must never be probed; only local storage.
 	install.SkopeoInspectFn = func(args ...string) ([]byte, error) {
-		call++
-		if call == 1 {
-			// Remote inspect: offline / unreachable
-			return nil, fmt.Errorf("network unreachable")
+		if len(args) > 0 && strings.HasPrefix(args[0], "docker://") {
+			t.Errorf("live-host CheckImage must not probe the registry, got: %v", args)
+			return nil, fmt.Errorf("registry must not be contacted")
 		}
-		// Local inspect: image is cached
-		return []byte(`{"Digest":"sha256:cached","Layers":["sha256:l1","sha256:l2","sha256:l3"]}`), nil
+		return []byte(`{"Digest":"sha256:local","Layers":["sha256:l1","sha256:l2"]}`), nil
 	}
 	defer func() { install.SkopeoInspectFn = install.DefaultSkopeoInspect }()
 
 	result := install.CheckImage("ghcr.io/tuna-os/yellowfin:gnome-hwe")
 	if result.NeedsPull {
-		t.Error("NeedsPull should be false when offline but image is in local storage")
+		t.Error("NeedsPull should be false on a live host even when the registry would otherwise require it")
 	}
-	if !result.Offline {
-		t.Error("Offline should be true when registry was unreachable")
+	if result.LayerCount != 2 {
+		t.Errorf("LayerCount = %d, want 2", result.LayerCount)
 	}
-	if result.LayerCount != 3 {
-		t.Errorf("LayerCount = %d, want 3", result.LayerCount)
+}
+
+func TestCheckImage_LiveEnvironmentMissingLocalDoesNotPull(t *testing.T) {
+	install.HostVarConstrainedFn = func() bool { return true }
+	defer func() { install.HostVarConstrainedFn = install.DefaultHostVarConstrained }()
+
+	install.SkopeoInspectFn = func(args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("not found locally")
+	}
+	defer func() { install.SkopeoInspectFn = install.DefaultSkopeoInspect }()
+
+	result := install.CheckImage("ghcr.io/tuna-os/yellowfin:gnome-hwe")
+	if result.NeedsPull {
+		t.Error("NeedsPull should stay false on a live host: the embedded image is the only valid source")
 	}
 }
 
@@ -317,6 +368,7 @@ func TestBootcInstall_DirectComposeFsExportsOCI(t *testing.T) {
 		return nil
 	}
 	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
+	_ = stubHostVarTmpBind(t)
 
 	err := install.BootcInstall(install.Options{
 		ComposeFsBackend: true,
@@ -355,6 +407,7 @@ func TestBootcInstall_DirectComposeFsUsesCustomScratchDir(t *testing.T) {
 		return nil
 	}
 	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
+	_ = stubHostVarTmpBind(t)
 
 	err := install.BootcInstall(install.Options{
 		ComposeFsBackend: true,
@@ -475,55 +528,6 @@ func TestNeedsContainerStorageMount_ComposeFsBackend(t *testing.T) {
 	}
 }
 
-// TestInjectStorageTmpDir verifies that injectStorageTmpDir correctly adds or
-// replaces the tmpdir line in a containers/storage TOML config string.
-func TestInjectStorageTmpDir(t *testing.T) {
-	newLine := `tmpdir = "/scratch"`
-
-	t.Run("replaces existing tmpdir", func(t *testing.T) {
-		conf := "[storage]\ndriver = \"vfs\"\ntmpdir = \"/old\"\ngraphroot = \"/var/lib/containers/storage\"\n"
-		result := install.InjectStorageTmpDir(conf, newLine)
-		if !strings.Contains(result, `tmpdir = "/scratch"`) {
-			t.Errorf("expected replaced tmpdir, got:\n%s", result)
-		}
-		if strings.Contains(result, `"/old"`) {
-			t.Errorf("old tmpdir still present:\n%s", result)
-		}
-	})
-
-	t.Run("injects when no tmpdir line", func(t *testing.T) {
-		conf := "[storage]\ndriver = \"vfs\"\nrunroot = \"/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n"
-		result := install.InjectStorageTmpDir(conf, newLine)
-		if !strings.Contains(result, `tmpdir = "/scratch"`) {
-			t.Errorf("tmpdir not injected, got:\n%s", result)
-		}
-		// Existing fields must still be present.
-		if !strings.Contains(result, `driver = "vfs"`) {
-			t.Errorf("driver line missing:\n%s", result)
-		}
-	})
-
-	t.Run("injects before next section", func(t *testing.T) {
-		conf := "[storage]\ndriver = \"overlay\"\n\n[storage.options]\nadditionalimagestores = []\n"
-		result := install.InjectStorageTmpDir(conf, newLine)
-		if !strings.Contains(result, `tmpdir = "/scratch"`) {
-			t.Errorf("tmpdir not injected, got:\n%s", result)
-		}
-		// additionalimagestores must survive unchanged.
-		if !strings.Contains(result, "additionalimagestores") {
-			t.Errorf("[storage.options] section lost:\n%s", result)
-		}
-	})
-
-	t.Run("handles empty config (live-ISO fallback)", func(t *testing.T) {
-		conf := ""
-		result := install.InjectStorageTmpDir(conf, newLine)
-		// No [storage] section → nothing to inject, just return unchanged.
-		// The fallback path in writeStorageConfWithTmpDir handles this.
-		_ = result // just must not panic
-	})
-}
-
 // TestBootcInstall_NonComposefsContainerExportsOCI verifies that when
 // SourceImgref is set and ComposeFsBackend is false (non-composefs container
 // mode with overlay redirect), the OCI export function IS called.  Regression
@@ -557,6 +561,7 @@ func TestBootcInstall_NonComposefsContainerExportsOCI(t *testing.T) {
 		return os.WriteFile(destDir+"/index.json", []byte("{}"), 0644)
 	}
 	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
+	_ = stubHostVarTmpBind(t)
 
 	// The overlay redirect requires scratch on an overlay-capable filesystem
 	// (ext4/xfs/btrfs).  t.TempDir() is typically on tmpfs.  Use /var/tmp
@@ -608,6 +613,7 @@ func TestBootcInstall_NonComposefsDirectSkipsOCIExport(t *testing.T) {
 		return nil
 	}
 	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
+	_ = stubHostVarTmpBind(t)
 
 	err := install.BootcInstall(install.Options{
 		ComposeFsBackend: false,
@@ -619,5 +625,96 @@ func TestBootcInstall_NonComposefsDirectSkipsOCIExport(t *testing.T) {
 	}
 	if exportCalled {
 		t.Error("SkopeoExportOCIFn was called for non-composefs direct mode (should be skipped)")
+	}
+}
+
+// TestBootcInstall_NonComposefsContainer_HostVarConstrainedSkipsNeedsPull verifies
+// that non-composefs container installs skip setting opts.NeedsPull when
+// HostVarConstrainedFn returns true for registry image sources.
+func TestBootcInstall_NonComposefsContainer_HostVarConstrainedSkipsNeedsPull(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Fake podman: just exit 0.
+	podmanPath := tmpDir + "/podman"
+	if err := os.WriteFile(podmanPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing fake podman: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", tmpDir+":"+oldPath); err != nil {
+		t.Fatalf("setting PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
+
+	install.SkopeoExportOCIFn = func(image, destDir, tmpdir string) error {
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(destDir+"/index.json", []byte("{}"), 0644)
+	}
+	defer func() { install.SkopeoExportOCIFn = install.DefaultSkopeoExportOCI }()
+	_ = stubHostVarTmpBind(t)
+
+	// Force HostVarConstrainedFn to true (simulating live ISO).
+	install.HostVarConstrainedFn = func() bool { return true }
+	defer func() { install.HostVarConstrainedFn = install.DefaultHostVarConstrained }()
+
+	scratchDir, err := os.MkdirTemp("/var/tmp", "fisherman-test-scratch-*")
+	if err != nil {
+		t.Skipf("cannot create scratch on /var/tmp: %v", err)
+	}
+	defer os.RemoveAll(scratchDir)
+
+	opts := install.Options{
+		ComposeFsBackend: false,
+		SourceImgref:     "docker://ghcr.io/ublue-os/bluefin:stable",
+		TargetImgref:     "ghcr.io/ublue-os/bluefin:stable",
+		Target:           tmpDir + "/target",
+		ScratchDir:       scratchDir,
+		NeedsPull:        false,
+	}
+
+	err = install.BootcInstall(opts)
+	if err != nil {
+		t.Fatalf("BootcInstall() error = %v", err)
+	}
+}
+
+func TestSkopeoExportOCI_UsesHostVarTmpBindFn(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "oci-cache")
+	scratchDir := filepath.Join(tmpDir, "scratch")
+	if err := os.MkdirAll(scratchDir, 0755); err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+
+	// Fake skopeo: exit 0
+	skopeoPath := tmpDir + "/skopeo"
+	if err := os.WriteFile(skopeoPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing fake skopeo: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", tmpDir+":"+oldPath); err != nil {
+		t.Fatalf("setting PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
+
+	var hookCalledWith string
+	cleanupCalled := false
+	install.HostVarTmpBindFn = func(s string) (func(), error) {
+		hookCalledWith = s
+		return func() { cleanupCalled = true }, nil
+	}
+	defer func() { install.HostVarTmpBindFn = install.DefaultHostVarTmpBind }()
+
+	err := install.DefaultSkopeoExportOCI("ghcr.io/ublue-os/bluefin:stable", destDir, scratchDir)
+	if err != nil {
+		t.Fatalf("DefaultSkopeoExportOCI() error = %v", err)
+	}
+	if hookCalledWith != scratchDir {
+		t.Errorf("HostVarTmpBindFn called with %q, want %q", hookCalledWith, scratchDir)
+	}
+	if !cleanupCalled {
+		t.Error("cleanup returned by HostVarTmpBindFn was not called")
 	}
 }
